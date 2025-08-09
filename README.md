@@ -4,7 +4,7 @@ The modular, modern, and secure kernel for NeetComputers.
 ## Overview
 NexCore is a kernel + registry designed to let you define your operating system.
 
-It does not enforce a filesystem layout, init system, or package manager. It does not assume your workflow, your UI, or your tools. The registry is the single source of truth, and everything else is modular and replaceable.
+It does not impose a filesystem layout, init system, or package manager. It does not assume your workflow, your UI, or your tools. The registry is the single source of truth, and everything else is modular and replaceable.
 
 There is no "correct" way to build on Nex. Only your way.
 
@@ -13,7 +13,7 @@ The reason Nex is able to be so modular is the kernel + registry architecture. I
 ## Key Concepts
 
 ### What is the system registry?
-The system registry is the single source of truth for the Nex kernel. The system registry must live inside of `/core/registry/`. Inside of `registry/`, the kernel only cares about `system.reg`. Inside of `system.reg`, key filesystem locations such as drivers, kernel modules, and more are defined. Everything the kernel needs to know which is reasonably seen as changable is available for modification there.
+The system registry is the single source of truth for the Nex kernel. The system registry must live inside of `/core/registry/`. Inside of `registry/`, the kernel only cares about `system.reg`. Inside of `system.reg`, key filesystem locations such as drivers, kernel modules, and more are defined. Everything the kernel needs to know which is reasonably seen as changeable is available for modification there.
 
 ### How does the registry define system configuration?
 Inside of `system.reg`, which is internally a JSON file, parameters such as `SYSTEM.KERNEL.driver_locations` and `SYSTEM.KERNEL.module_locations` can be defined. `system.reg` also contains the user password hashes, under `SYSTEM.USERS.[username].password_hash`.
@@ -21,7 +21,7 @@ Inside of `system.reg`, which is internally a JSON file, parameters such as `SYS
 Inside of `user_[username].reg`, specific user configs for things such as applications are available. Shell configuration would be under `SHELL.location`, `SHELL.PATH`, `SHELL.aliases`, and other entries OS specific.
 
 ### Benefits of this design
-Nex's kernel + registry architecture allows for systems to be completely customizable, and allows people to build operating systems ontop of the kernel to fit their exact needs without conforming to any specific design idea, aside from the kernel + registry. On a Windows-like clone, you have the potential to run basic apps which were written for a Linux-like clone. This design ensures that even when developers have wildly different goals, a common interface can be achieved, and the wheel does not need to be reinvented each time.
+Nex's kernel + registry architecture allows for systems to be completely customizable, and allows people to build operating systems ontop of the kernel to fit their exact needs without conforming to any specific design idea, aside from the kernel + registry. On a Windows-like clone, you have the potential to run basic apps which were written for a Linux-like clone, as they can share the same common kernel! This design ensures that even when developers have wildly different goals, a common interface can be achieved, and the wheel does not need to be reinvented each time.
 
 ## Usage
 The Nex kernel can be copied with a provided template, and by simply providing your own `SYSTEM.KERNEL.init` file path, you can get started with building your OS.
