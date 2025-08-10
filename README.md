@@ -1,45 +1,151 @@
 # NexCore
-The modular, modern, and secure kernel for NeetComputers.
+
+**The modular, modern, and secure microkernel for NeetComputers**
+
+---
 
 ## Overview
-NexCore is a kernel + registry designed to let you define your operating system.
 
-It does not impose a filesystem layout, init system, or package manager. It does not assume your workflow, your UI, or your tools. The registry is the single source of truth, and everything else is modular and replaceable.
+NexCore is a capability-based microkernel plus a single, authoritative system registry that together provide a flexible foundation for building general-purpose operating systems on the NeetComputers platform.
 
-There is no "correct" way to build on Nex. Only your way.
+NexCore intentionally implements a minimal kernel: as much policy and functionality as possible runs in user space. The registry is the single source of truth for system configuration, driver and module locations, user records, defaults, and backups. That separation enables extreme flexibility. You define the OS by editing the registry, not by changing the kernel.
 
-The reason Nex is able to be so modular is the kernel + registry architecture. It is a microkernel design which already allows flexibility, and the registry puts this to the max. While the Windows, Mac, and Linux kernels will force a specific filesystem layout or driver location, Nex does not care. You can build a Windows clone on Nex, a Linux clone, or whatever you desire. Everything in the Nex kernel that can reasonably be seen as an option you might want to change is available to change inside of the registry.
+NexCore is a kernel + registry. It does not try to be a full OS distribution. It provides the primitives and a small, consistent surface that others can use to implement shells, init systems, package managers, or full desktop/server environments.
 
-## Key Concepts
+---
 
-### What is the system registry?
-The system registry is the single source of truth for the Nex kernel. The system registry must live inside of `/core/registry/`. Inside of `registry/`, the kernel only cares about `system.reg`. Inside of `system.reg`, key filesystem locations such as drivers, kernel modules, and more are defined. Everything the kernel needs to know which is reasonably seen as changeable is available for modification there.
+## Key Principles
 
-### How does the registry define system configuration?
-Inside of `system.reg`, which is internally a JSON file, parameters such as `SYSTEM.KERNEL.driver_locations` and `SYSTEM.KERNEL.module_locations` can be defined. `system.reg` also contains the user password hashes, under `SYSTEM.USERS.[username].password_hash`.
+* **Modularity**: Everything outside the kernel is replaceable. Filesystem layout, init, package manager, and UI are choices you make.
+* **Capability-based security**: IPC and resource access are capability-oriented, keeping the kernel minimal and safe.
+* **Single source of truth**: The registry (`/core/registry/system.reg`) encodes the configuration the kernel relies on.
+* **Human-readable configuration**: The registry uses JSON to make inspection, diffing, and editing straightforward.
 
-Inside of `user_[username].reg`, specific user configs for things such as applications are available. Shell configuration would be under `SHELL.location`, `SHELL.PATH`, `SHELL.aliases`, and other entries OS specific.
+---
 
-### Benefits of this design
-Nex's kernel + registry architecture allows for systems to be completely customizable, and allows people to build operating systems ontop of the kernel to fit their exact needs without conforming to any specific design idea, aside from the kernel + registry. On a Windows-like clone, you have the potential to run basic apps which were written for a Linux-like clone, as they can share the same common kernel! This design ensures that even when developers have wildly different goals, a common interface can be achieved, and the wheel does not need to be reinvented each time.
+## Architecture (high level)
 
-## Usage
-The Nex kernel can be copied with a provided template, and by simply providing your own `SYSTEM.KERNEL.init` file path, you can get started with building your OS.
+* **Microkernel**: capability-based, message-passing oriented. The kernel implements only the smallest possible primitives: capability checks, IPC, scheduling, and boot initialization.
+* **Registry**: a set of files under `/core/registry/`. The kernel reads `system.reg` at boot and may re-read it at runtime when requested. The registry controls driver locations, module locations, init paths, and user records.
+* **Userland**: drivers, device managers, filesystems, and higher-level services live in user space and interact with the kernel through capabilities and IPC.
 
-### APIs
-**APIs are not yet defined**
+---
 
-## Future work & known issues
-Nex is still in very heavy development. More to come soon.
+## The Registry
 
-## License and contact info
-Nex is licensed under the Apache License 2.0. \
-\
-\
-Discord: swoshswosh_01578
+The registry is the single source of truth for NexCore. It is intentionally simple and composed of a few well-known files under the hard-coded path `/core/registry/`:
 
-Email: swoshswosh@proton.me
+* `system.reg` the kernel-visible root registry file (JSON).
+* `user_[username].reg` per-user configuration and preferences (JSON).
+* `defaults.reg` system defaults (JSON).
+* `backups/` optional directory for registry snapshots.
 
-Github: SpartanSf
+**Notes:**
 
-https://github.com/SpartanSf/NexCore
+* The registry format is JSON for readability and ease of tooling. Multiple parsers and editors can be built around it.
+* The registry files are considered authoritative and are therefore a single hard requirement for NexCore; the kernel expects them under `/core/registry/`.
+* Password hashes are stored in the registry but may only be modified by the root user. The system is designed with security in mind, but service authors should follow best practices for hashing and key management.
+
+---
+
+## Runtime behavior
+
+* `system.reg` is read at boot. The kernel may support reloading parts of the registry at runtime, but not all changes are guaranteed to take effect without a restart. Treat runtime updates as potentially requiring a reboot for full effect.
+* Editing the registry is manual in the current design (this repository contains kernel + registry primitives only). Higher-level tools and editors are planned to provide safer editing in the future.
+
+---
+
+## Drivers & Modules
+
+Drivers and kernel modules are provided by userland components and located where `system.reg` points. The registry exposes `driver_locations` and `module_locations` so distributions built on NexCore can organize drivers however they prefer.
+
+The driver API (loader, capability registration, lifecycle) is a work in progress and will be published in the API documentation as the project progresses.
+
+---
+
+## Status & Roadmap
+
+**Current status:** design & documentation phase. There is no production code yet; the project is defining architecture and registry semantics.
+
+**Near-term roadmap:**
+
+* Define the driver/module loading API and publish the first specification.
+* Document the capability-based IPC model and security primitives.
+* Prototype the advanced security model and the DQRR scheduler.
+* Add `npr`, a registry-aware package format/manager design.
+
+**Long-term goals:**
+
+* A stable kernel ABI for drivers and services.
+* Tooling for safe registry edits and runtime reconfiguration.
+* Reference userland components (init, shell, minimal userspace) to help adopters bootstrap.
+
+---
+
+## Compatibility & Platform
+
+NexCore targets the NeetComputers platform.
+
+---
+
+## Security
+
+Security is a fundamental design goal:
+
+* Password hashes stored in the registry are only writable by root or by tools with explicit capabilities.
+* Capability-based IPC reduces the kernel's trust surface.
+* Future work will define secure update paths for the registry, signed backups, and protected edits.
+
+---
+
+## APIs
+
+APIs and bindings are currently under design. Planned surface areas include:
+
+* Driver loading and capability registration.
+* Registry read/write helpers and validation schemas.
+* IPC primitives for capability-based communication.
+
+---
+
+## Getting started (conceptual)
+
+Because the project is currently documentation & spec-first, there is no runnable kernel yet. When code lands, a typical quickstart will look like:
+
+1. Clone the NexCore repository and read the specification.
+2. Create a `/core/registry/system.reg` based on the provided template.
+3. Place your init binary path in `SYSTEM.KERNEL.init`.
+4. Boot NeetComputers with the NexCore kernel image.
+
+---
+
+## Contributing & Community
+
+* The project is not yet accepting code contributions. The repo is focused on design and documentation for the moment.
+* Issues, suggestions, and roadmap requests are welcome via GitHub issues or the contact channels below.
+* If you want to discuss design, reach out on Discord or by email.
+
+**Contact:**
+
+* GitHub: `https://github.com/SpartanSf/NexCore`
+* Discord: `swoshswosh_01578`
+* Email: `swoshswosh@proton.me`
+
+---
+
+## License
+
+NexCore is released under the Apache License 2.0.
+
+---
+
+## FAQ (brief)
+
+**Q: Is NexCore an OS?**
+A: No. NexCore is a kernel + registry. It provides the primitive surface on which complete operating systems can be built.
+
+**Q: Can I change the registry location?**
+A: Not currently. The registry path `/core/registry/` is a hard requirement for the kernel design.
+
+**Q: Can changes be made at runtime?**
+A: Parts of the registry can be reloaded at runtime but not all changes are guaranteed to take effect until a reboot.
