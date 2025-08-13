@@ -188,15 +188,8 @@ function _G.setNice(value)
     end
 end
 
-local function clamp(n, lo, hi)
-    if n < lo then return lo end
-    if n > hi then return hi end
-    return n
-end
-
 function scheduler.run()
     local BASE_QUANTUM = scheduler.baseQuantum
-    local NICE_RANGE   = 100
 
     while next(scheduler.procs) do
         local runnable = {}
@@ -207,32 +200,31 @@ function scheduler.run()
         end
         if #runnable == 0 then break end
 
-        for k,v in ipairs(runnable) do
-           print(k, v.nice)
-        end
-        print("inital end")
         table.sort(runnable, function(a, b)
             return a.nice < b.nice
         end)
-        for k,v in ipairs(runnable) do
-           print(k, v.nice)
+
+        local weights = {}
+        local totalWeight = 0
+        local BASE = 1.08
+        for i, proc in ipairs(runnable) do
+            local nice = math.max(-20, math.min(19, proc.nice or 0))
+            local weight = 1024 * (BASE ^ (-nice))
+            weights[i] = weight
+            totalWeight = totalWeight + weight
         end
-        print("sorted end")
 
-        for _, proc in ipairs(runnable) do
+        for i, proc in ipairs(runnable) do
             scheduler.current = proc.pid
-
-            local nice = clamp(proc.nice or 0, -NICE_RANGE, NICE_RANGE)
-            local quantum = BASE_QUANTUM + (-nice)
+            local weight = weights[i]
+            local quantum = math.floor(BASE_QUANTUM * (weight / totalWeight) * #runnable)
             if quantum < 1 then quantum = 1 end
 
-            debug.sethook(proc.co, function()
-                coroutine.yield()
-            end, "", quantum)
+            print(proc.nice, quantum)
 
+            debug.sethook(proc.co, function() coroutine.yield() end, "", quantum)
             local ok, err = coroutine.resume(proc.co)
             if not ok then error(err) end
-
             debug.sethook(proc.co)
         end
         NexB.flush()
@@ -262,13 +254,13 @@ spawn(function()
             kernel.term.print("Parent iteration", i)
         end
     end
-end, -50)
+end, -10)
 
 
 spawn(function()
     for i = 1, 5 do
         kernel.term.print("Low-priority process iteration", i)
     end
-end, 50)
+end, 10)
 
 scheduler.run()
