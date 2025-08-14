@@ -2,12 +2,14 @@ local kInternal = {}
 kInternal.term  = {}
 _G.kernel       = {}
 _G.kernel.term  = {}
+_G.kernel.ipc   = {}
 
 kInternal.term.backgroundColor            = {0, 0, 0}
 kInternal.term.foregroundColor            = {255, 255, 255}
 kInternal.term.setColor                   = screen.setColor
 kInternal.term.savedPalettes              = {}
 kInternal.scrBackup                       = {}
+kInternal.uid                             = 0
 
 for k,v in pairs(screen) do kernel.term[k] = v end
 for k,v in pairs(screen) do kInternal.scrBackup[k] = v end
@@ -15,6 +17,21 @@ kernel.term.setColor = nil
 _ENV.screen = nil
 
 math.randomseed(math.abs(chip.getTime()))
+
+--compatibility
+_G.loadstring = load
+_G.loadfile = function(filename, mode, env)
+    local file = fs.open(filename, "r")
+    print("Reading and loading file")
+    local fn, err = load(file.read("a"), "="..filename, mode, env)
+    print("Complete")
+    file.close()
+    return fn, err
+end
+
+function _G.dofile(filename)
+    return loadfile(filename, "="..filename, "bt", _ENV)()
+end
 
 function _G.sleep(time)
     local t = chip.getTime()
@@ -160,7 +177,7 @@ local function spawn(fn, nice)
     local pid = scheduler.nextPid
     scheduler.nextPid = scheduler.nextPid + 1
     local co = coroutine.create(fn)
-    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn }
+    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn, uid = kInternal.uid }
     return pid
 end
 
@@ -220,7 +237,7 @@ function scheduler.run()
             local quantum = math.floor(BASE_QUANTUM * (weight / totalWeight) * #runnable)
             if quantum < 1 then quantum = 1 end
 
-            print(proc.nice, quantum)
+            kInternal.uid = proc.uid
 
             debug.sethook(proc.co, function() coroutine.yield() end, "", quantum)
             local ok, err = coroutine.resume(proc.co)
@@ -237,12 +254,45 @@ function scheduler.run()
     end
 end
 
+function kernel.getUID()
+    return kInternal.uid
+end
+
+function kernel.isRoot()
+    return kInternal.uid == 0
+end
+
+function kernel.getPID()
+    return scheduler.current
+end
+
 kernel.term.logMessage("kernel scheduler loaded", "kernel", "OK")
 kernel.term.flush()
 
+local acl = {}
+
+function kernel.ipc.register(name, aclrule)
+    if type(name) ~= "string" then return false, "Expected name to be a string" end
+    if type(aclrule) ~= "table" then return false, "Expected aclrule to be a table" end
+
+    if acl[name] then return false, "Name is already registered" end
+
+    acl[name] = {currentPID, aclrule}
+
+    return true
+end
+
+function kernel.ipc.canTransmit(pid)
+    for _, v in acl do
+        if v[1] == pid then
+
+        end
+    end
+end
+
+--[[
 spawn(function()
     local pid = fork()
-
     if pid == 0 then
         kernel.term.print("Child (high-priority) running")
         for i = 1, 5 do
@@ -264,3 +314,135 @@ spawn(function()
 end, 10)
 
 scheduler.run()
+]]
+
+local fn, err = loadfile("system:lib/sha2.lua", "t", _ENV)
+if err then kernel.logMessage(err, "kernel", "ERROR") end
+local sha = fn()
+
+local fn, err = loadfile("system:lib/base64.lua", "t", _ENV)
+if err then kernel.logMessage(err, "kernel", "ERROR") end
+local base64 = fn()
+
+
+
+
+local function random_bytes(len)
+    local t = {}
+    local addr = tostring(t)
+    print("Table address "..addr)
+    local seed = tonumber(addr:match(":%s*(%x+)"), 16) or 0
+    seed = bit32.bxor(seed, chip.getTime())
+    seed = bit32.bxor(seed, math.random(0xFFFF) * 0x10000 + math.random(0xFFFF))
+    math.randomseed(seed)
+
+    local out = {}
+    for i = 1, len do
+        out[i] = string.char(math.random(0, 255))
+    end
+    return table.concat(out)
+end
+local function b2(message)
+    return sha.blake2b_512(message, nil, nil)
+end
+
+local function pack_inputs(...)
+    local parts = {}
+    for i = 1, select("#", ...) do
+        local v = select(i, ...)
+        if type(v) == "string" then
+            parts[#parts+1] = "\x01" .. string.char(#v % 256) .. v
+        else
+            local s = tostring(v)
+            parts[#parts+1] = "\x02" .. string.char(#s % 256) .. s
+        end
+    end
+    return table.concat(parts)
+end
+
+local function H(...)
+    return b2(pack_inputs(...))
+end
+
+local function balloon_hash(password, salt, space_cost, time_cost, delta)
+    assert(type(password) == "string" and #password > 0, "password required")
+    assert(type(salt) == "string" and #salt >= 16, "salt >= 16 bytes")
+    assert(space_cost and space_cost >= 8, "space_cost >= 8")
+    assert(time_cost and time_cost >= 1, "time_cost >= 1")
+    assert(delta and delta >= 1, "delta >= 1")
+
+    local m = space_cost
+    local buf = {}
+
+    buf[1] = H("init", salt, password)
+    for i = 2, m do
+        buf[i] = H("expand", buf[i-1])
+    end
+    for r = 0, time_cost - 1 do
+        for i = 1, m do
+            print(r, i)
+            buf[i] = H("mix", r, i, buf[i])
+
+            for j = 0, delta - 1 do
+                local pr = H("idx", r, i, j, buf[i])
+                local v = 0
+                for k = 1, 8 do
+                    v = (v * 256 + pr:byte(k)) % 0x7fffffff
+                end
+                local idx = (v % m) + 1
+                buf[i] = H("mix2", buf[i], buf[idx])
+            end
+        end
+    end
+
+    return H("final", salt, time_cost, m, delta, buf[m])
+end
+
+local DEFAULT_SPACE = 4096
+local DEFAULT_TIME  = 3
+local DEFAULT_DELTA = 3
+
+local function hash_password(password, opts)
+    opts = opts or {}
+    local space = opts.space_cost or DEFAULT_SPACE
+    local timec = opts.time_cost  or DEFAULT_TIME
+    local delta = opts.delta      or DEFAULT_DELTA
+
+    local salt = random_bytes(16) -- 128-bit salt
+    local tag  = balloon_hash(password, salt, space, timec, delta)
+    return table.concat({
+        "balloon-b2b",
+        tostring(space),
+        tostring(timec),
+        tostring(delta),
+        base64.encode(salt),
+        base64.encode(tag)
+    }, "$")
+end
+
+local function verify_password(password, stored)
+    -- Format: balloon-b2b$space$time$delta$salt_b64$tag_b64
+    local alg, space, timec, delta, salt_b64, tag_b64 =
+        stored:match("^([^$]+)%$(%d+)%$(%d+)%$(%d+)%$(.-)%$(.+)$")
+    if alg ~= "balloon-b2b" then return false end
+
+    space  = tonumber(space)
+    timec  = tonumber(timec)
+    delta  = tonumber(delta)
+    local salt = base64.decode(salt_b64)
+    local tag_expected = base64.decode(tag_b64)
+
+    local tag = balloon_hash(password, salt, space, timec, delta)
+
+    if #tag ~= #tag_expected then return false end
+    local diff = 0
+    for i = 1, #tag do
+        diff = bit32.bxor(diff, bit32.bxor(tag:byte(i), tag_expected:byte(i)))
+    end
+    return diff == 0
+end
+
+local stored = hash_password("hunter2", { space_cost = 8, time_cost = 1, delta = 2 })
+print("Stored:", stored)
+print("OK:", verify_password("hunter2", stored))
+print("NO:", verify_password("nope", stored))
