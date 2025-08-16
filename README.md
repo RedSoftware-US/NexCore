@@ -1,4 +1,4 @@
-# NexCore
+# NexCore v0.3.2
 
 **The modular, modern, and secure microkernel for NeetComputers**
 
