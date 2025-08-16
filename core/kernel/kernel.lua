@@ -23,7 +23,7 @@ _G.kernel.term      = {}
 _G.kernel.ipc       = {}
 _G.kernel.hashlib   = {}
 _G.kernel.scheduler = {}
-_G.kernel.version   = "0.3.1"
+_G.kernel.version   = "0.3.2"
 
 kernel.fs                                 = {}
 
@@ -737,6 +737,32 @@ end
 kernel.term.logMessage("kernel vfs loaded", "kernel", "OK")
 kernel.term.flush()
 
+local function deep_copy(original)
+    local copy = {}
+    local seen = {}
+
+    local function copy_recursive(obj)
+        if type(obj) ~= "table" then
+            return obj
+        end
+
+        if seen[obj] then
+            return seen[obj]
+        end
+
+        local new_table = {}
+        seen[obj] = new_table
+
+        for k, v in pairs(obj) do
+            new_table[copy_recursive(k)] = copy_recursive(v)
+        end
+
+        return new_table
+    end
+
+    return copy_recursive(original)
+end
+
 local scheduler = {
     procs = {},
     current = nil,
@@ -755,14 +781,32 @@ end
 function kernel.scheduler.spawnFile(path, nice)
     local pid = scheduler.nextPid
     scheduler.nextPid = scheduler.nextPid + 1
-    local fn, err = loadfile(path, "bt", _ENV)
+    local fn, err = loadfile(path, "bt", deep_copy(_ENV))
     if not fn then return nil, err end
     local sysmeta = kInternal.readSysmeta()
-    if not sysmeta[path] then return nil, "Could not find path in sysmeta" end
+    if not sysmeta[path:sub(8)] then return nil, "Could not find path in sysmeta" end
 
     local co = coroutine.create(fn)
 
-    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn, uid = kInternal.uid, gids = kInternal.gids, ruid = kInternal.ruid, rgids = kInternal.rgids, canSetUID = sysmeta[path].extra.setUID, owner = sysmeta[path].owner }
+    local meta = sysmeta[path:sub(8)]
+    local canSetUID = false
+    if meta.extra and meta.extra.setUID then
+        canSetUID = true
+    end
+
+    scheduler.procs[pid] = {
+        co = co,
+        pid = pid,
+        nice = nice or 0,
+        fn = fn,
+        uid = kInternal.uid,
+        gids = kInternal.gids,
+        ruid = kInternal.ruid,
+        rgids = kInternal.rgids,
+        canSetUID = canSetUID,
+        owner = meta.owner
+    }
+
     return pid
 end
 
@@ -1037,12 +1081,33 @@ if kInternal.systemRegistry.KERNEL.enable_hashlib == true then
     kernel.term.flush()
 end
 
+do
+	local moduleList = kernel.fs.getChildren(kInternal.systemRegistry.KERNEL.module_location.."/others")
+
+    if moduleList then
+        for _, path in ipairs(moduleList) do
+            if kernel.fs.isFile(kInternal.systemRegistry.KERNEL.module_location.."/others/"..path) then
+                dofile(kInternal.systemRegistry.KERNEL.module_location.."/others/"..path)
+            end
+        end
+
+        kernel.term.logMessage("modules loaded", "kernel", "OK")
+        kernel.term.flush()
+    end
+end
+
 kernel.term.logMessage("attempting to load init script", "kernel", "INFO")
 kernel.term.flush()
 
 if not kernel.fs.exists(kInternal.systemRegistry.KERNEL.init) then
     kernel.term.logMessage("Could not locate init script", "kernel", "CRITICAL")
+    kernel.term.flush()
     return
 else
-    spawnFile(kInternal.systemRegistry.KERNEL.init, 0)
+    kernel.term.logMessage("located init script, loading...", "kernel", "OK")
+    kernel.term.flush()
+    local _, err = kernel.scheduler.spawnFile(kInternal.systemRegistry.KERNEL.init, 0)
+    if err then print(err) end
 end
+
+scheduler.run()

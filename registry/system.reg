@@ -4,6 +4,7 @@
         driver_location = "",
         module_location = "system:core/kernel/modules",
         library_location = "system:lib",
+        enable_hashlib = true,
     },
     ["USERS"] = {
         ["0"] = {
@@ -14,7 +15,7 @@
     ["FILESYSTEM"] = {
         METAFILE = "system:core/a.sysmeta",
         MOUNTS = {
-            ["system"] = "realfs.lua"
+            ["system"] = "fs/realfs.lua"
         }
     }
 }
