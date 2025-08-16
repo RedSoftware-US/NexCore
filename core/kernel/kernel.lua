@@ -4,6 +4,9 @@ _G.kernel       = {}
 _G.kernel.term  = {}
 _G.kernel.ipc   = {}
 _G.kernel.hashlib = {}
+_G.kernel.scheduler = {}
+
+kernel.fs                                 = {}
 
 kInternal.term.backgroundColor            = {0, 0, 0}
 kInternal.term.foregroundColor            = {255, 255, 255}
@@ -11,27 +14,150 @@ kInternal.term.setColor                   = screen.setColor
 kInternal.term.savedPalettes              = {}
 kInternal.scrBackup                       = {}
 kInternal.uid                             = 0
+kInternal.ruid                            = 0
+kInternal.gids                            = {0}
+kInternal.rgids                           = {0}
+kInternal.peripherals                     = peripherals
+kInternal.fs                              = {}
 
+for k,v in pairs(fs) do kernel.fs[k] = v end
+for k,v in pairs(fs) do kInternal.fs[k] = v end
 for k,v in pairs(screen) do kernel.term[k] = v end
 for k,v in pairs(screen) do kInternal.scrBackup[k] = v end
+
 kernel.term.setColor = nil
 _ENV.screen = nil
+_ENV.peripherals = nil
+_G.fs = nil
 
 math.randomseed(math.abs(chip.getTime()))
 
 --compatibility
 _G.loadstring = load
 _G.loadfile = function(filename, mode, env)
-    local file = fs.open(filename, "r")
-    print("Reading and loading file")
+    local file = kernel.fs.open(filename, "r")
+    if not kInternal.fs.exists(filename) then print(filename.." does not exist") end
     local fn, err = load(file.read("a"), "="..filename, mode, env)
-    print("Complete")
     file.close()
     return fn, err
 end
 
 function _G.dofile(filename)
     return loadfile(filename, "="..filename, "bt", _ENV)()
+end
+
+function kernel.readTableFile(path)
+    local file = kernel.fs.open(path, "r")
+    return load("local t = "..file.read("a").."\nreturn t", "="..path, "t", _ENV)()
+end
+
+kInternal.systemRegistry, err = kernel.readTableFile("system:registry/system.reg")
+if err then kernel.term.write("CRITICAL: SYSTEM REGISTRY ERROR. SEE CONSOLE"); print(err); return end
+
+if (not kInternal.systemRegistry) or (kInternal.systemRegistry == {}) then kernel.term.write("CRITICAL: COULD NOT LOCATE SYSTEM REGISTRY"); return end
+
+function kInternal.readSysmeta()
+    print(kInternal.systemRegistry.FILESYSTEM.METAFILE, kInternal.fs.exists(kInternal.systemRegistry.FILESYSTEM.METAFILE))
+    local file = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "r")
+    return load("local t = "..file.read("a").."\nreturn t", "="..kInternal.systemRegistry.FILESYSTEM.METAFILE, mode, _ENV)()
+end
+
+local modulePath = kInternal.systemRegistry.KERNEL.module_location
+local mountPaths = kInternal.systemRegistry.FILESYSTEM.MOUNTS
+
+local filesystems = {}
+local cachedMounts = {}
+
+for k,v in pairs(mountPaths) do
+    if cachedMounts[v] then filesystems[k] = cachedMounts[v] else
+        local fsFunc, err = dofile(modulePath.."/"..v)
+        if err then kernel.term.write("CRITICAL: FS ERROR IN "..v..". SEE CONSOLE"); print(err); return end
+        cachedMounts[v] = fsFunc
+        filesystems[k] = cachedMounts[v]
+    end
+end
+
+local function sanitizePath(path)
+    path = tostring(path)
+
+    path = path:gsub("/+", "/")
+
+    local parts = {}
+    for part in path:gmatch("[^/]+") do
+        if part == ".." then
+            if #parts > 0 then
+                table.remove(parts)
+            end
+        elseif part ~= "." and part ~= "" then
+            table.insert(parts, part)
+        end
+    end
+
+    return table.concat(parts, "/")
+end
+
+function kernel.fs.open(path, mode)
+    path = sanitizePath(path)
+    if not kInternal.fs.exists(path) then return nil, "File does not exist" end
+
+    local sysmeta = kInternal.readSysmeta()
+
+    local uid = kInternal.uid
+    local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
+
+    while path ~= "" and not sysmeta[path] do
+        local parent = path:match("(.+)/[^/]+$")
+        path = parent or ""
+    end
+
+    local data = sysmeta[path]
+    if not data then return nil, "Could not retrieve sysmeta information" end
+
+    local str = tostring(data.privilege)
+    if #str < 3 then
+        str = string.rep("0", 3 - #str) .. str
+    end
+
+    local perms = { owner = {}, group = {}, others = {} }
+    local categories = {"owner", "group", "others"}
+
+    for i = 1, 3 do
+        local digit = tonumber(str:sub(i, i))
+        perms[categories[i]].read    = digit >= 4
+        perms[categories[i]].write   = (digit % 4) >= 2
+        perms[categories[i]].execute = (digit % 2) == 1
+    end
+
+    local currentPermissions
+
+    if data.owner == uid then
+        currentPermissions = perms.owner
+    else
+        local foundGroup = false
+        for _,group in ipairs(gids) do
+            if group == data.group then
+                currentPermissions = perms.group
+                foundGroup = true
+                break
+            end
+        end
+        if not foundGroup then currentPermissions = perms.others end
+    end
+
+    local modeFlags = {
+        w = {write=true}, a = {write=true}, wb = {write=true}, ab = {write=true},
+        r = {read=true}, rb = {read=true},
+        ["r+"] = {read=true, write=true}, ["r+b"] = {read=true, write=true},
+        ["a+"] = {read=true, write=true}, ["a+b"] = {read=true, write=true},
+    }
+
+    local flags = modeFlags[mode] or {}
+    if (flags.read and not currentPermissions.read) or
+    (flags.write and not currentPermissions.write) then
+        return nil, "Refused"
+    end
+
+    return kInternal.fs.open(path, mode)
 end
 
 function _G.sleep(time)
@@ -175,11 +301,25 @@ local scheduler = {
     baseQuantum = 500
 }
 
-local function spawn(fn, nice)
+function kernel.scheduler.spawn(fn, nice)
     local pid = scheduler.nextPid
     scheduler.nextPid = scheduler.nextPid + 1
     local co = coroutine.create(fn)
-    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn, uid = kInternal.uid }
+    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn, uid = kInternal.uid, gids = kInternal.gids, ruid = kInternal.ruid, rgids = kInternal.rgids, canSetUID = false }
+    return pid
+end
+
+function kernel.scheduler.spawnFile(path, nice)
+    local pid = scheduler.nextPid
+    scheduler.nextPid = scheduler.nextPid + 1
+    local fn, err = loadfile(path, "bt", _ENV)
+    if not fn then return nil, err end
+    local sysmeta = kInternal.readSysmeta()
+    if not sysmeta[path] then return nil, "Could not find path in sysmeta" end
+
+    local co = coroutine.create(fn)
+
+    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn, uid = kInternal.uid, gids = kInternal.gids, ruid = kInternal.ruid, rgids = kInternal.rgids, canSetUID = sysmeta[path].extra.setUID, owner = sysmeta[path].owner }
     return pid
 end
 
@@ -200,11 +340,51 @@ function _G.fork()
     return childPid
 end
 
-function _G.setNice(value)
+function kernel.scheduler.setNice(value)
     local pid = scheduler.current
     if pid and scheduler.procs[pid] then
         scheduler.procs[pid].nice = value
     end
+end
+
+function kernel.scheduler.setEUID(newUID)
+    local pid = scheduler.current
+    local proc = scheduler.procs[pid]
+
+    if not proc then return nil, "No current process" end
+
+    if newUID == proc.ruid then
+        proc.uid = newUID
+        proc.canSetUID = false
+        return true
+    end
+
+    if proc.canSetUID then
+        if newUID == proc.owner then
+            proc.uid = newUID
+            proc.canSetUID = false
+            return true
+        end
+    end
+
+    return nil, "Permission denied"
+end
+
+function kernel.scheduler.setRUID(newUID)
+    local pid = scheduler.current
+    local proc = scheduler.procs[pid]
+
+    if not proc then return nil, "No current process" end
+
+    if proc.uid == 0 then
+        if type(newUID) ~= "number" or newUID < 0 then
+            return nil, "Invalid UID"
+        end
+        proc.ruid = newUID
+        return true
+    end
+
+    return nil, "Permission denied"
 end
 
 function scheduler.run()
@@ -240,6 +420,9 @@ function scheduler.run()
             if quantum < 1 then quantum = 1 end
 
             kInternal.uid = proc.uid
+            kInternal.ruid = proc.ruid
+            kInternal.gids = proc.gids
+            kInternal.rgids = proc.rgids
 
             debug.sethook(proc.co, function() coroutine.yield() end, "", quantum)
             local ok, err = coroutine.resume(proc.co)
@@ -256,15 +439,27 @@ function scheduler.run()
     end
 end
 
-function kernel.getUID()
+function kernel.scheduler.getEUID()
     return kInternal.uid
 end
 
-function kernel.isRoot()
+function kernel.scheduler.getRUID()
+    return kInternal.ruid
+end
+
+function kernel.scheduler.getEGID()
+    return kInternal.gids
+end
+
+function kernel.scheduler.getRGID()
+    return kInternal.rgids
+end
+
+function kernel.scheduler.isRoot()
     return kInternal.uid == 0
 end
 
-function kernel.getPID()
+function kernel.scheduler.getPID()
     return scheduler.current
 end
 
@@ -363,7 +558,7 @@ end, 10)
 scheduler.run()
 ]]
 
-local fn, err = loadfile("system:lib/sha.lua", "t", _ENV)
+local fn, err = loadfile(kInternal.systemRegistry.KERNEL.library_location.."/libsha.lua", "t", _ENV)
 if err then print("ERROR: "..err) end
 local sha256 = fn()
 

@@ -1,0 +1,17 @@
+{
+    ["boot"] = {type = "d", owner = 0, group = 0, privilege = 755},
+    ["boot/meta.lua"] = {type = "-", owner = 0, group = 0, privilege = 664},
+    ["core"] = {type = "d", owner = 0, group = 0, privilege = 755},
+    ["core/a.sysmeta"] = {type = "-", owner = 0, group = 0, privilege = 600},
+    ["core/kernel"] = {type = "d", owner = 0, group = 0, privilege = 644},
+    ["core/kernel/kernel.lua"] = {type = "-", owner = 0, group = 0, privilege = 664},
+    ["core/kernel/modules"] = {type = "d", owner = 0, group = 0, privilege = 644},
+    ["core/kernel/modules/realfs.lua"] = {type = "-", owner = 0, group = 0, privilege = 664},
+    ["lib"] = {type = "d", owner = 0, group = 0, privilege = 755},
+    ["lib/libbase64.lua"] = {type = "-", owner = 0, group = 0, privilege = 664},
+    ["lib/libjson.lua"] = {type = "-", owner = 0, group = 0, privilege = 664},
+    ["lib/libluacompat.lua"] = {type = "-", owner = 0, group = 0, privilege = 664},
+    ["lib/libsha.lua"] = {type = "-", owner = 0, group = 0, privilege = 664},
+    ["registry"] = {type = "d", owner = 0, group = 0, privilege = 755},
+    ["registry/system.reg"] = {type = "-", owner = 0, group = 0, privilege = 664},
+}
