@@ -23,7 +23,7 @@ _G.kernel.term      = {}
 _G.kernel.ipc       = {}
 _G.kernel.hashlib   = {}
 _G.kernel.scheduler = {}
-_G.kernel.version   = "0.3.0"
+_G.kernel.version   = "0.3.1"
 
 kernel.fs                                 = {}
 
@@ -49,6 +49,143 @@ _ENV.screen = nil
 _ENV.peripherals = nil
 _G.fs = nil
 
+
+function _G.sleep(time)
+    local t = chip.getTime()
+    while true do
+        coroutine.yield()
+        if t + (time * 1000) <= chip.getTime() then
+            break
+        end
+    end
+end
+
+function kernel.term.print(...)
+    local n = select('#', ...)
+    if n == 0 then
+        NexB.writeScr("\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
+        return
+    end
+
+    local parts = {}
+    for i = 1, n do
+        parts[#parts + 1] = tostring(select(i, ...))
+    end
+
+    local str = table.concat(parts, "\t")
+
+    NexB.writeScr(str .. "\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
+end
+
+function kernel.term.expect(value, vtype, message)
+    local t = type(value)
+    if type(vtype) == "string" then
+        if t ~= vtype then
+            kernel.term.print(message)
+            return nil
+        end
+    elseif type(vtype) == "table" then
+        local ok = false
+        for _, allowed in ipairs(vtype) do
+            if t == allowed then
+                ok = true
+                break
+            end
+        end
+        if not ok then
+            kernel.term.print(message)
+            return nil
+        end
+    end
+    return true
+end
+
+kernel.term.setCursorPos = NexB.setCursorPos
+kernel.term.getCursorPos = NexB.getCursorPos
+kernel.term.flush        = NexB.flush
+function kernel.term.write(str)
+    NexB.writeScr(str, kInternal.term.foregroundColor, kInternal.term.backgroundColor)
+end
+function kernel.term.clear()
+    local scr_w, scr_h = kernel.term.getSize()
+
+    kernel.term.fill(0,0,scr_w, scr_h)
+
+    kernel.term.setCursorPos(0,0)
+end
+function kernel.term.setForegroundColor(r, g, b)
+    if not kernel.term.expect(r, "number", "Expected number for red value") then return end
+    if not kernel.term.expect(g, "number", "Expected number for green value") then return end
+    if not kernel.term.expect(b, "number", "Expected number for blue value") then return end
+
+    kInternal.term.foregroundColor = {r, g, b}
+end
+function kernel.term.setBackgroundColor(r, g, b)
+    if not kernel.term.expect(r, "number", "Expected number for red value") then return end
+    if not kernel.term.expect(g, "number", "Expected number for green value") then return end
+    if not kernel.term.expect(b, "number", "Expected number for blue value") then return end
+
+    kInternal.term.backgroundColor = {r, g, b}
+end
+function kernel.term.saveColorPalette()
+    local paletteID = math.random(0xFFFF) * 0x10000 + math.random(0xFFFF)
+    kInternal.term.savedPalettes[paletteID] = {kInternal.term.foregroundColor, kInternal.term.backgroundColor}
+    return paletteID
+end
+function kernel.term.restoreColorPalette(ID)
+    if not kernel.term.expect(ID, "number", "Expected number for palette ID") then return end
+
+    if not kInternal.term.savedPalettes[ID] then kernel.term.print("Palette ID "..ID.." does not exist!"); return end
+
+    kInternal.term.foregroundColor = kInternal.term.savedPalettes[ID][1]
+    kInternal.term.backgroundColor = kInternal.term.savedPalettes[ID][2]
+
+    kInternal.term.savedPalettes[ID] = nil
+end
+
+local typeColor = {
+    ["INFO"]      = {{248, 249, 250}, {0, 0, 0}},
+    ["OK"]        = {{40, 167, 69}, {0, 0, 0}},
+    ["DEBUG"]     = {{23, 162, 184}, {0, 0, 0}},
+    ["TRACE"]     = {{108, 117, 125}, {0, 0, 0}},
+    ["NOTICE"]    = {{32, 201, 151}, {0, 0, 0}},
+    ["WARNING"]   = {{255, 193, 7}, {0, 0, 0}},
+    ["ERROR"]     = {{220, 53, 69}, {0, 0, 0}},
+    ["FAIL"]      = {{255, 0, 0}, {0, 0, 0}},
+    ["CRITICAL"]  = {{255, 0, 0}, {0, 0, 0}},
+    ["ALERT"]     = {{255, 7, 58}, {0, 0, 0}},
+    ["EMERGENCY"] = {{255, 255, 255}, {220, 53, 69}},
+}
+
+function kernel.term.logMessage(msg, name, msgType)
+    if name then name = name .. ": " else name = "" end
+
+    if not typeColor[msgType] then return false end
+
+    local msgFg = typeColor[msgType][1]
+    local msgBg = typeColor[msgType][2]
+
+    local colorPaletteID = kernel.term.saveColorPalette()
+
+    kernel.term.write("[")
+
+    kernel.term.setForegroundColor(msgFg[1], msgFg[2], msgFg[3])
+    kernel.term.setBackgroundColor(msgBg[1], msgBg[2], msgBg[3])
+
+    kernel.term.write(string.rep(" ", 9 - #msgType)..msgType)
+
+    kernel.term.restoreColorPalette(colorPaletteID)
+
+    kernel.term.print("] "..name..msg)
+end
+
+kernel.term.logMessage("kernel term functions loaded", "kernel", "OK")
+kernel.term.flush()
+
+function _ENV.error(message, level)
+    kernel.term.logMessage(message, "error", "ERROR")
+end
+
 math.randomseed(math.abs(chip.getTime()))
 
 --compatibility
@@ -72,9 +209,11 @@ function kernel.readTableFile(path)
 end
 
 kInternal.systemRegistry, err = kernel.readTableFile("system:registry/system.reg")
-if err then kernel.term.write("CRITICAL: SYSTEM REGISTRY ERROR. SEE CONSOLE"); print(err); return end
+if err then kernel.term.logMessage("SYSTEM REGISTRY ERROR. SEE CONSOLE", "kernel", "CRITICAL"); print(err); return end
 
-if (not kInternal.systemRegistry) or (kInternal.systemRegistry == {}) then kernel.term.write("CRITICAL: COULD NOT LOCATE SYSTEM REGISTRY"); return end
+if (not kInternal.systemRegistry) or (kInternal.systemRegistry == {}) then
+    kernel.term.logMessage("COULD NOT LOCATE SYSTEM REGISTRY", "kernel", "CRITICAL"); return
+end
 
 function kInternal.readSysmeta()
     local file = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "r")
@@ -90,9 +229,10 @@ local cachedMounts = {}
 for k,v in pairs(mountPaths) do
     if cachedMounts[v] then filesystems[k] = cachedMounts[v] else
         local fsFunc, err = loadfile(modulePath.."/"..v, "t", _ENV)
-        if err then kernel.term.write("CRITICAL: FS ERROR IN "..v..". SEE CONSOLE"); print(err); return end
+        if err then kernel.term.logMessage("FS ERROR IN "..v..". SEE CONSOLE", "kernel", "CRITICAL"); print(err); return end
         cachedMounts[v] = fsFunc()
         filesystems[k] = cachedMounts[v]
+        kernel.term.logMessage("successfully located and mounted \""..k.."\"", "kernel", "OK")
     end
 end
 
@@ -216,6 +356,91 @@ local function getParent(path)
     return partition .. ":/" .. parent
 end
 
+local function inheritMeta(path, sysmeta)
+    local parent = path:match("(.+)/[^/]+$")
+    local isDir  = kInternal.fs.isDir("system:" .. path)
+
+    if not parent then
+        return {
+            group = 0.0,
+            owner = 0.0,
+            type = isDir and "d" or "-",
+            privilege = isDir and 755.0 or 644.0
+        }
+    end
+
+    if sysmeta[parent] then
+        local parentMeta = sysmeta[parent]
+        local priv = parentMeta.privilege
+
+        if isDir then
+            return {
+                group = parentMeta.group,
+                owner = parentMeta.owner,
+                type = "d",
+                privilege = priv
+            }
+        else
+            local o = math.floor(priv / 100)
+            local g = math.floor((priv % 100) / 10)
+            local u = priv % 10
+            o = o - (o % 2)
+            g = g - (g % 2)
+            u = u - (u % 2)
+            priv = o*100 + g*10 + u
+            return {
+                group = parentMeta.group,
+                owner = parentMeta.owner,
+                type = "-",
+                privilege = priv
+            }
+        end
+    else
+        return inheritMeta(parent, sysmeta)
+    end
+end
+
+function kernel.syncSysmeta()
+    local sysmeta = kInternal.readSysmeta()
+    local missing = {}
+    local existing = {}
+
+    local function scanDir(path)
+        local children = kInternal.fs.getChildren(path)
+        for _, child in ipairs(children) do
+            local full = path .. "/" .. child
+            local rel  = full:sub(8):gsub("^/", "")
+            existing[rel] = true
+            if not sysmeta[rel] then
+                table.insert(missing, rel)
+            end
+            if kInternal.fs.isDir(full) then
+                scanDir(full)
+            end
+        end
+    end
+
+    scanDir("system:")
+
+    for key in pairs(sysmeta) do
+        if not existing[key] then
+            sysmeta[key] = nil
+        end
+    end
+
+    for _, rel in ipairs(missing) do
+        sysmeta[rel] = inheritMeta(rel, sysmeta)
+    end
+
+    local fileOut = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "w")
+    fileOut.write(serpent.serialize(sysmeta, {compact = true}))
+    fileOut.close()
+
+    return sysmeta
+end
+
+kernel.syncSysmeta()
+
 function kernel.fs.open(path, mode)
     path = sanitizePath(path)
     local sysmeta = kInternal.readSysmeta()
@@ -239,7 +464,7 @@ function kernel.fs.open(path, mode)
     end
 
     local data = sysmeta[sysmetaPath:sub(8)]
-    if not data then return nil, "Could not retrieve sysmeta information" end
+    if not data then return nil, "Could not retrieve sysmeta information for "..path end
 
     local str = tostring(data.privilege)
     if #str < 3 then str = string.rep("0", 3 - #str) .. str end
@@ -299,23 +524,16 @@ function kernel.fs.createFile(path, owner, group, privilege)
         return false, "No permission to create file in parent directory"
     end
 
-    local file, err = kInternal.fs.open("system:core/a.sysmeta", "r+")
-    if not file then return false, "Cannot open sysmeta: " .. err end
-
-    local sysmetaData = file.read("a") or "{}"
-    file.close()
-
     local sysmeta = kInternal.readSysmeta()
 
-    sysmeta[path] = {
+    sysmeta[path:sub(8)] = {
         type = "-",
         owner = owner,
         group = group,
         privilege = privilege
     }
 
-    local fileOut, err2 = kInternal.fs.open("system:core/a.sysmeta", "w")
-    if not fileOut then return false, "Cannot write sysmeta: " .. err2 end
+    local fileOut = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "w")
 
     fileOut.write(serpent.serialize(sysmeta, {compact = true}))
     fileOut.close()
@@ -330,20 +548,27 @@ function kernel.fs.exists(path)
     local uid = kInternal.uid
     local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
 
-    local checkPath = path
-    while checkPath ~= "" do
-        local meta = sysmeta[checkPath:sub(8)]
+    local components = {}
+    for part in path:gmatch("[^/]+") do
+        table.insert(components, part)
+    end
+
+    local currentPath = ""
+    for i = 1, #components - 1 do
+        currentPath = currentPath .. "/" .. components[i]
+        local rel = currentPath:sub(8)
+        local meta = sysmeta[rel]
         if meta then
             local str = tostring(meta.privilege)
             if #str < 3 then str = string.rep("0", 3 - #str) .. str end
 
             local perms = { owner = {}, group = {}, others = {} }
             local categories = {"owner", "group", "others"}
-            for i = 1, 3 do
-                local digit = tonumber(str:sub(i, i))
-                perms[categories[i]].read    = digit >= 4
-                perms[categories[i]].write   = (digit % 4) >= 2
-                perms[categories[i]].execute = (digit % 2) == 1
+            for j = 1, 3 do
+                local digit = tonumber(str:sub(j, j))
+                perms[categories[j]].read    = digit >= 4
+                perms[categories[j]].write   = (digit % 4) >= 2
+                perms[categories[j]].execute = (digit % 2) == 1
             end
 
             local currentPermissions
@@ -361,14 +586,10 @@ function kernel.fs.exists(path)
                 if not foundGroup then currentPermissions = perms.others end
             end
 
-            if not currentPermissions.execute then
-                return false
+            if uid ~= 0 and not currentPermissions.execute then
+                return nil, "Refused"
             end
         end
-
-        if checkPath == "/" then break end
-        local parent = checkPath:match("(.+)/[^/]+$")
-        checkPath = parent or ""
     end
 
     return findFilesystem(path).exists(kInternal.fs, path)
@@ -376,16 +597,16 @@ end
 
 function kernel.fs.isFile(path)
     if not kernel.fs.exists(path) then return false end
-    return findFilesystem(path).isFile(fs, path) or false
+    return findFilesystem(path).isFile(kInternal.fs, path) or false
 end
 
 function kernel.fs.isDir(path)
     if not kernel.fs.exists(path) then return false end
-    return findFilesystem(path).isDir(fs, path) or false
+    return findFilesystem(path).isDir(kInternal.fs, path) or false
 end
 
 function kernel.fs.delete(path)
-    if not kernel.fs.exists(path) then return false, "Path does not exist" end
+    if not kernel.fs.exists(path) then return nil, "Path does not exist" end
 
     local sysmeta = kInternal.readSysmeta()
     local uid = kInternal.uid
@@ -423,7 +644,7 @@ function kernel.fs.delete(path)
             end
 
             if not currentPermissions.write then
-                return false, "No write permission"
+                return nil, "No write permission"
             end
             break
         end
@@ -433,12 +654,20 @@ function kernel.fs.delete(path)
         metaPath = parent or ""
     end
 
-    return findFilesystem(path).delete(fs, path)
+    local retdel = findFilesystem(path).delete(kInternal.fs, path)
+
+    local fileOut = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "w")
+
+    sysmeta[path:sub(8)] = nil
+    fileOut.write(serpent.serialize(sysmeta, {compact = true}))
+    fileOut.close()
+
+    return retdel
 end
 
 function kernel.fs.getChildren(path)
     if not kernel.fs.exists(path) or not kernel.fs.isDir(path) then return nil, "Not a directory" end
-    return findFilesystem(path).getChildren(fs, path)
+    return findFilesystem(path).getChildren(kInternal.fs, path)
 end
 
 function kernel.fs.makeDir(path)
@@ -484,7 +713,7 @@ function kernel.fs.makeDir(path)
         end
 
         if not (currentPermissions.write and currentPermissions.execute) then
-            return false, "No permission to create directory"
+            return nil, "No permission to create directory"
         end
     end
 
@@ -497,7 +726,7 @@ function kernel.fs.makeDir(path)
         privilege = 755
     }
 
-    local f, err = kernel.fs.open("system:core/a.sysmeta", "w")
+    local f, err = kernel.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "w")
     if not f then return false, "Failed to update sysmeta: "..err end
     f.write(serpent.serialize(sysmeta, {compact = true}))
     f.close()
@@ -505,139 +734,8 @@ function kernel.fs.makeDir(path)
     return true
 end
 
-function _G.sleep(time)
-    local t = chip.getTime()
-    while true do
-        coroutine.yield()
-        if t + (time * 1000) <= chip.getTime() then
-            break
-        end
-    end
-end
-
-function kernel.term.print(...)
-    local n = select('#', ...)
-    if n == 0 then
-        NexB.writeScr("\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
-        return
-    end
-
-    local parts = {}
-    for i = 1, n do
-        parts[#parts + 1] = tostring(select(i, ...))
-    end
-
-    local str = table.concat(parts, "\t")
-
-    NexB.writeScr(str .. "\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
-end
-
-function kernel.term.expect(value, vtype, message)
-    local t = type(value)
-    if type(vtype) == "string" then
-        if t ~= vtype then
-            kernel.term.print(message)
-            return nil
-        end
-    elseif type(vtype) == "table" then
-        local ok = false
-        for _, allowed in ipairs(vtype) do
-            if t == allowed then
-                ok = true
-                break
-            end
-        end
-        if not ok then
-            kernel.term.print(message)
-            return nil
-        end
-    end
-    return true
-end
-
-kernel.term.setCursorPos = NexB.setCursorPos
-kernel.term.getCursorPos = NexB.getCursorPos
-kernel.term.flush        = NexB.flush
-function kernel.term.write(str)
-    NexB.writeScr(str, kInternal.term.foregroundColor, kInternal.term.backgroundColor)
-end
-function kernel.term.clear()
-    local scr_w, scr_h = kernel.term.getSize()
-
-    kernel.term.fill(0,0,scr_w, scr_h)
-end
-function kernel.term.setForegroundColor(r, g, b)
-    if not kernel.term.expect(r, "number", "Expected number for red value") then return end
-    if not kernel.term.expect(g, "number", "Expected number for green value") then return end
-    if not kernel.term.expect(b, "number", "Expected number for blue value") then return end
-
-    kInternal.term.foregroundColor = {r, g, b}
-end
-function kernel.term.setBackgroundColor(r, g, b)
-    if not kernel.term.expect(r, "number", "Expected number for red value") then return end
-    if not kernel.term.expect(g, "number", "Expected number for green value") then return end
-    if not kernel.term.expect(b, "number", "Expected number for blue value") then return end
-
-    kInternal.term.backgroundColor = {r, g, b}
-end
-function kernel.term.saveColorPalette()
-    local paletteID = math.random(0xFFFF) * 0x10000 + math.random(0xFFFF)
-    kInternal.term.savedPalettes[paletteID] = {kInternal.term.foregroundColor, kInternal.term.backgroundColor}
-    return paletteID
-end
-function kernel.term.restoreColorPalette(ID)
-    if not kernel.term.expect(ID, "number", "Expected number for palette ID") then return end
-
-    if not kInternal.term.savedPalettes[ID] then kernel.term.print("Palette ID "..ID.." does not exist!"); return end
-
-    kInternal.term.foregroundColor = kInternal.term.savedPalettes[ID][1]
-    kInternal.term.backgroundColor = kInternal.term.savedPalettes[ID][2]
-
-    kInternal.term.savedPalettes[ID] = nil
-end
-
-local typeColor = {
-    ["INFO"]      = {{248, 249, 250}, {0, 0, 0}},
-    ["OK"]        = {{40, 167, 69}, {0, 0, 0}},
-    ["DEBUG"]     = {{23, 162, 184}, {0, 0, 0}},
-    ["TRACE"]     = {{108, 117, 125}, {0, 0, 0}},
-    ["NOTICE"]    = {{32, 201, 151}, {0, 0, 0}},
-    ["WARNING"]   = {{255, 193, 7}, {0, 0, 0}},
-    ["ERROR"]     = {{220, 53, 69}, {0, 0, 0}},
-    ["FAIL"]      = {{255, 0, 0}, {0, 0, 0}},
-    ["CRITICAL"]  = {{255, 0, 0}, {0, 0, 0}},
-    ["ALERT"]     = {{255, 7, 58}, {0, 0, 0}},
-    ["EMERGENCY"] = {{255, 255, 255}, {220, 53, 69}},
-}
-
-function kernel.term.logMessage(msg, name, msgType)
-    if name then name = name .. ": " else name = "" end
-
-    if not typeColor[msgType] then return false end
-
-    local msgFg = typeColor[msgType][1]
-    local msgBg = typeColor[msgType][2]
-
-    local colorPaletteID = kernel.term.saveColorPalette()
-
-    kernel.term.write("[")
-
-    kernel.term.setForegroundColor(msgFg[1], msgFg[2], msgFg[3])
-    kernel.term.setBackgroundColor(msgBg[1], msgBg[2], msgBg[3])
-
-    kernel.term.write(string.rep(" ", 9 - #msgType)..msgType)
-
-    kernel.term.restoreColorPalette(colorPaletteID)
-
-    kernel.term.print("] "..name..msg)
-end
-
-kernel.term.logMessage("kernel term functions loaded", "kernel", "OK")
+kernel.term.logMessage("kernel vfs loaded", "kernel", "OK")
 kernel.term.flush()
-
-function _ENV.error(message, level)
-    kernel.term.logMessage(message, "error", "ERROR")
-end
 
 local scheduler = {
     procs = {},
@@ -903,44 +1001,48 @@ end, 10)
 scheduler.run()
 ]]
 
-local fn, err = loadfile(kInternal.systemRegistry.KERNEL.library_location.."/libsha.lua", "t", _ENV)
-if err then print("ERROR: "..err) end
-local sha256 = fn()
+if kInternal.systemRegistry.KERNEL.enable_hashlib == true then
+    local fn, err = loadfile(kInternal.systemRegistry.KERNEL.library_location.."/libsha.lua", "t", _ENV)
+    if err then print("ERROR: "..err) end
+    local sha256 = fn()
 
-local charset = "qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM1234567890"
+    local charset = "qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM1234567890"
 
-function kernel.hashlib.generateSalt()
-	local ret = {}
-	local r
-	for i = 1, 32 do
-		r = math.random(1, #charset)
-		table.insert(ret, charset:sub(r, r))
-	end
-	return table.concat(ret)
+    function kernel.hashlib.generateSalt()
+        local ret = {}
+        local r
+        for i = 1, 32 do
+            r = math.random(1, #charset)
+            table.insert(ret, charset:sub(r, r))
+        end
+        return table.concat(ret)
+    end
+
+    function kernel.hashlib.encode(str, salt)
+        salt = salt or kernel.hashlib.generateSalt()
+        return salt .. ":" .. sha256(salt .. str)
+    end
+
+    function kernel.hashlib.compare(str, combined)
+        local sep_pos = combined:find(":")
+        if not sep_pos then return false end
+
+        local salt = combined:sub(1, sep_pos - 1)
+        local stored_hash = combined:sub(sep_pos + 1)
+        local test_hash = sha256(salt .. str)
+        return test_hash == stored_hash
+    end
+
+    kernel.term.logMessage("kernel hashlib loaded", "kernel", "OK")
+    kernel.term.flush()
 end
 
-function kernel.hashlib.encode(str, salt)
-    salt = salt or kernel.hashlib.generateSalt()
-    return salt .. ":" .. sha256(salt .. str)
-end
-
-function kernel.hashlib.compare(str, combined)
-    local sep_pos = combined:find(":")
-    if not sep_pos then return false end
-
-    local salt = combined:sub(1, sep_pos - 1)
-    local stored_hash = combined:sub(sep_pos + 1)
-    local test_hash = sha256(salt .. str)
-    return test_hash == stored_hash
-end
-
-kernel.term.logMessage("kernel hashlib loaded", "kernel", "OK")
+kernel.term.logMessage("attempting to load init script", "kernel", "INFO")
 kernel.term.flush()
 
-
-
-
-kernel.fs.makeDir("system:test")
-local file = kernel.fs.open("system:test/hi.txt", "w")
-file.write("hi")
-file.close()
+if not kernel.fs.exists(kInternal.systemRegistry.KERNEL.init) then
+    kernel.term.logMessage("Could not locate init script", "kernel", "CRITICAL")
+    return
+else
+    spawnFile(kInternal.systemRegistry.KERNEL.init, 0)
+end
