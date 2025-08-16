@@ -3,7 +3,7 @@
         init = "",
         driver_location = "",
         module_location = "system:core/kernel/modules",
-        library_location = "system:lib"
+        library_location = "system:lib",
     },
     ["USERS"] = {
         ["0"] = {
@@ -14,7 +14,7 @@
     ["FILESYSTEM"] = {
         METAFILE = "system:core/a.sysmeta",
         MOUNTS = {
-            ["/"] = "realfs.lua"
+            ["system"] = "realfs.lua"
         }
     }
 }

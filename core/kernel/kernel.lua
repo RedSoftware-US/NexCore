@@ -1,10 +1,11 @@
-local kInternal = {}
-kInternal.term  = {}
-_G.kernel       = {}
-_G.kernel.term  = {}
-_G.kernel.ipc   = {}
-_G.kernel.hashlib = {}
+local kInternal     = {}
+kInternal.term      = {}
+_G.kernel           = {}
+_G.kernel.term      = {}
+_G.kernel.ipc       = {}
+_G.kernel.hashlib   = {}
 _G.kernel.scheduler = {}
+_G.kernel.version   = "0.3.0"
 
 kernel.fs                                 = {}
 
@@ -35,8 +36,9 @@ math.randomseed(math.abs(chip.getTime()))
 --compatibility
 _G.loadstring = load
 _G.loadfile = function(filename, mode, env)
-    local file = kernel.fs.open(filename, "r")
+    local file, err = kernel.fs.open(filename, "r")
     if not kInternal.fs.exists(filename) then print(filename.." does not exist") end
+    if err then print("FS ERROR: "..err) end
     local fn, err = load(file.read("a"), "="..filename, mode, env)
     file.close()
     return fn, err
@@ -57,7 +59,6 @@ if err then kernel.term.write("CRITICAL: SYSTEM REGISTRY ERROR. SEE CONSOLE"); p
 if (not kInternal.systemRegistry) or (kInternal.systemRegistry == {}) then kernel.term.write("CRITICAL: COULD NOT LOCATE SYSTEM REGISTRY"); return end
 
 function kInternal.readSysmeta()
-    print(kInternal.systemRegistry.FILESYSTEM.METAFILE, kInternal.fs.exists(kInternal.systemRegistry.FILESYSTEM.METAFILE))
     local file = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "r")
     return load("local t = "..file.read("a").."\nreturn t", "="..kInternal.systemRegistry.FILESYSTEM.METAFILE, mode, _ENV)()
 end
@@ -70,9 +71,9 @@ local cachedMounts = {}
 
 for k,v in pairs(mountPaths) do
     if cachedMounts[v] then filesystems[k] = cachedMounts[v] else
-        local fsFunc, err = dofile(modulePath.."/"..v)
+        local fsFunc, err = loadfile(modulePath.."/"..v, "t", _ENV)
         if err then kernel.term.write("CRITICAL: FS ERROR IN "..v..". SEE CONSOLE"); print(err); return end
-        cachedMounts[v] = fsFunc
+        cachedMounts[v] = fsFunc()
         filesystems[k] = cachedMounts[v]
     end
 end
@@ -96,46 +97,151 @@ local function sanitizePath(path)
     return table.concat(parts, "/")
 end
 
-function kernel.fs.open(path, mode)
-    path = sanitizePath(path)
-    if not kInternal.fs.exists(path) then return nil, "File does not exist" end
+local function findFilesystem(path)
+    local partition, subPath = path:match("([^:]+):?(.*)")
+    if not subPath then return filesystems["system"] end
+    subPath = subPath:gsub("^/+", "")
 
+    local current = partition
+    local candidates = {}
+
+    if subPath ~= "" then
+        local parts = {}
+        for part in subPath:gmatch("[^/]+") do
+            table.insert(parts, part)
+        end
+
+        for i = #parts, 0, -1 do
+            local candidate = current
+            if i > 0 then
+                candidate = candidate .. ":" .. table.concat(parts, "/", 1, i)
+            end
+            table.insert(candidates, candidate)
+        end
+    else
+        table.insert(candidates, current)
+    end
+
+    for _, candidate in ipairs(candidates) do
+        if filesystems[candidate] then
+            return filesystems[candidate]
+        end
+    end
+
+    return filesystems["system"]
+end
+
+local function checkPermissions(path, requireWrite, requireExecute)
     local sysmeta = kInternal.readSysmeta()
-
     local uid = kInternal.uid
     local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
 
-    while path ~= "" and not sysmeta[path] do
-        local parent = path:match("(.+)/[^/]+$")
-        path = parent or ""
+    local checkPath = path
+    while checkPath ~= "" do
+        local meta = sysmeta[checkPath:sub(8)]
+        if meta then
+            local str = tostring(meta.privilege)
+            if #str < 3 then str = string.rep("0", 3 - #str) .. str end
+
+            local perms = { owner = {}, group = {}, others = {} }
+            local categories = {"owner", "group", "others"}
+            for i = 1, 3 do
+                local digit = tonumber(str:sub(i, i))
+                perms[categories[i]].read    = digit >= 4
+                perms[categories[i]].write   = (digit % 4) >= 2
+                perms[categories[i]].execute = (digit % 2) == 1
+            end
+
+            local currentPermissions
+            if meta.owner == uid then
+                currentPermissions = perms.owner
+            else
+                local foundGroup = false
+                for _,group in ipairs(gids) do
+                    if group == meta.group then
+                        currentPermissions = perms.group
+                        foundGroup = true
+                        break
+                    end
+                end
+                if not foundGroup then currentPermissions = perms.others end
+            end
+
+            if (requireWrite and not currentPermissions.write) or
+               (requireExecute and not currentPermissions.execute) then
+                return false
+            else
+                return true
+            end
+        end
+
+        if checkPath == "/" then break end
+        local parent = checkPath:match("(.+)/[^/]+$")
+        checkPath = parent or ""
     end
 
-    local data = sysmeta[path]
+    return true
+end
+
+local function getParent(path)
+    path = sanitizePath(path)
+    local partition, subPath = path:match("([^:]+):/?(.*)")
+    if not subPath or subPath == "" then
+        return partition .. ":/"
+    end
+
+    local parent = subPath:match("(.+)/[^/]+$")
+    if not parent then
+        return partition .. ":/"
+    end
+
+    return partition .. ":/" .. parent
+end
+
+function kernel.fs.open(path, mode)
+    path = sanitizePath(path)
+    local sysmeta = kInternal.readSysmeta()
+    local uid = kInternal.uid
+    local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
+
+    local exists = kInternal.fs.exists(path)
+    local writableModes = {w=true, wb=true, a=true, ab=true, ["r+"]=true, ["r+b"]=true, ["a+"]=true, ["a+b"]=true}
+    if not exists and writableModes[mode] then
+        local ok, err = kernel.fs.createFile(path, uid, 0, 644)
+        if not ok then return nil, "Cannot create file: " .. err end
+        exists = true
+    elseif not exists then
+        return nil, "File does not exist"
+    end
+
+    local sysmetaPath = path
+    while sysmetaPath ~= "" and not sysmeta[sysmetaPath:sub(8)] do
+        local parent = sysmetaPath:match("(.+)/[^/]+$")
+        sysmetaPath = parent or ""
+    end
+
+    local data = sysmeta[sysmetaPath:sub(8)]
     if not data then return nil, "Could not retrieve sysmeta information" end
 
     local str = tostring(data.privilege)
-    if #str < 3 then
-        str = string.rep("0", 3 - #str) .. str
-    end
+    if #str < 3 then str = string.rep("0", 3 - #str) .. str end
 
     local perms = { owner = {}, group = {}, others = {} }
     local categories = {"owner", "group", "others"}
-
     for i = 1, 3 do
-        local digit = tonumber(str:sub(i, i))
+        local digit = tonumber(str:sub(i,i))
         perms[categories[i]].read    = digit >= 4
         perms[categories[i]].write   = (digit % 4) >= 2
         perms[categories[i]].execute = (digit % 2) == 1
     end
 
     local currentPermissions
-
     if data.owner == uid then
         currentPermissions = perms.owner
     else
         local foundGroup = false
-        for _,group in ipairs(gids) do
-            if group == data.group then
+        for _,g in ipairs(gids) do
+            if g == data.group then
                 currentPermissions = perms.group
                 foundGroup = true
                 break
@@ -150,14 +256,235 @@ function kernel.fs.open(path, mode)
         ["r+"] = {read=true, write=true}, ["r+b"] = {read=true, write=true},
         ["a+"] = {read=true, write=true}, ["a+b"] = {read=true, write=true},
     }
-
     local flags = modeFlags[mode] or {}
-    if (flags.read and not currentPermissions.read) or
-    (flags.write and not currentPermissions.write) then
+    if (flags.read and not currentPermissions.read) or (flags.write and not currentPermissions.write) then
         return nil, "Refused"
     end
 
-    return kInternal.fs.open(path, mode)
+    return findFilesystem(path).open(kInternal.fs, path, mode)
+end
+
+function kernel.fs.createFile(path, owner, group, privilege)
+    path = sanitizePath(path)
+
+    owner = owner or kInternal.uid
+    group = group or 0
+    privilege = privilege or 744
+
+    local parent = path:match("(.+)/[^/]+$") or "/"
+    if not kernel.fs.exists(parent) then
+        local ok, err = kernel.fs.makeDir(parent)
+        if not ok then return false, err end
+    end
+
+    if not checkPermissions(parent, true, true) then
+        return false, "No permission to create file in parent directory"
+    end
+
+    local file, err = kInternal.fs.open("system:core/a.sysmeta", "r+")
+    if not file then return false, "Cannot open sysmeta: " .. err end
+
+    local sysmetaData = file.read("a") or "{}"
+    file.close()
+
+    local sysmeta = kInternal.readSysmeta()
+
+    sysmeta[path] = {
+        type = "-",
+        owner = owner,
+        group = group,
+        privilege = privilege
+    }
+
+    local fileOut, err2 = kInternal.fs.open("system:core/a.sysmeta", "w")
+    if not fileOut then return false, "Cannot write sysmeta: " .. err2 end
+
+    fileOut.write(serpent.serialize(sysmeta, {compact = true}))
+    fileOut.close()
+
+    return true
+end
+
+function kernel.fs.exists(path)
+    path = sanitizePath(path)
+
+    local sysmeta = kInternal.readSysmeta()
+    local uid = kInternal.uid
+    local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
+
+    local checkPath = path
+    while checkPath ~= "" do
+        local meta = sysmeta[checkPath:sub(8)]
+        if meta then
+            local str = tostring(meta.privilege)
+            if #str < 3 then str = string.rep("0", 3 - #str) .. str end
+
+            local perms = { owner = {}, group = {}, others = {} }
+            local categories = {"owner", "group", "others"}
+            for i = 1, 3 do
+                local digit = tonumber(str:sub(i, i))
+                perms[categories[i]].read    = digit >= 4
+                perms[categories[i]].write   = (digit % 4) >= 2
+                perms[categories[i]].execute = (digit % 2) == 1
+            end
+
+            local currentPermissions
+            if meta.owner == uid then
+                currentPermissions = perms.owner
+            else
+                local foundGroup = false
+                for _,group in ipairs(gids) do
+                    if group == meta.group then
+                        currentPermissions = perms.group
+                        foundGroup = true
+                        break
+                    end
+                end
+                if not foundGroup then currentPermissions = perms.others end
+            end
+
+            if not currentPermissions.execute then
+                return false
+            end
+        end
+
+        if checkPath == "/" then break end
+        local parent = checkPath:match("(.+)/[^/]+$")
+        checkPath = parent or ""
+    end
+
+    return findFilesystem(path).exists(kInternal.fs, path)
+end
+
+function kernel.fs.isFile(path)
+    if not kernel.fs.exists(path) then return false end
+    return findFilesystem(path).isFile(fs, path) or false
+end
+
+function kernel.fs.isDir(path)
+    if not kernel.fs.exists(path) then return false end
+    return findFilesystem(path).isDir(fs, path) or false
+end
+
+function kernel.fs.delete(path)
+    if not kernel.fs.exists(path) then return false, "Path does not exist" end
+
+    local sysmeta = kInternal.readSysmeta()
+    local uid = kInternal.uid
+    local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
+
+    local metaPath = path
+    while metaPath ~= "" do
+        local meta = sysmeta[metaPath:sub(8)]
+        if meta then
+            local str = tostring(meta.privilege)
+            if #str < 3 then str = string.rep("0", 3 - #str) .. str end
+
+            local perms = { owner = {}, group = {}, others = {} }
+            local categories = {"owner", "group", "others"}
+            for i = 1, 3 do
+                local digit = tonumber(str:sub(i, i))
+                perms[categories[i]].read    = digit >= 4
+                perms[categories[i]].write   = (digit % 4) >= 2
+                perms[categories[i]].execute = (digit % 2) == 1
+            end
+
+            local currentPermissions
+            if meta.owner == uid then
+                currentPermissions = perms.owner
+            else
+                local foundGroup = false
+                for _,group in ipairs(gids) do
+                    if group == meta.group then
+                        currentPermissions = perms.group
+                        foundGroup = true
+                        break
+                    end
+                end
+                if not foundGroup then currentPermissions = perms.others end
+            end
+
+            if not currentPermissions.write then
+                return false, "No write permission"
+            end
+            break
+        end
+
+        if metaPath == "/" then break end
+        local parent = metaPath:match("(.+)/[^/]+$")
+        metaPath = parent or ""
+    end
+
+    return findFilesystem(path).delete(fs, path)
+end
+
+function kernel.fs.getChildren(path)
+    if not kernel.fs.exists(path) or not kernel.fs.isDir(path) then return nil, "Not a directory" end
+    return findFilesystem(path).getChildren(fs, path)
+end
+
+function kernel.fs.makeDir(path)
+    path = sanitizePath(path)
+    local parent = getParent(path)
+
+    if not kernel.fs.exists(parent) then
+        local ok, err = kernel.fs.makeDir(parent)
+        if not ok then return false, err end
+    end
+
+    local sysmeta = kInternal.readSysmeta()
+    local uid = kInternal.uid
+    local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
+
+    local meta = sysmeta[parent:sub(8)]
+    if meta then
+        local str = tostring(meta.privilege)
+        if #str < 3 then str = string.rep("0", 3 - #str) .. str end
+
+        local perms = { owner = {}, group = {}, others = {} }
+        local categories = {"owner", "group", "others"}
+        for i = 1, 3 do
+            local digit = tonumber(str:sub(i,i))
+            perms[categories[i]].read    = digit >= 4
+            perms[categories[i]].write   = (digit % 4) >= 2
+            perms[categories[i]].execute = (digit % 2) == 1
+        end
+
+        local currentPermissions
+        if meta.owner == uid then
+            currentPermissions = perms.owner
+        else
+            local foundGroup = false
+            for _,g in ipairs(gids) do
+                if g == meta.group then
+                    currentPermissions = perms.group
+                    foundGroup = true
+                    break
+                end
+            end
+            if not foundGroup then currentPermissions = perms.others end
+        end
+
+        if not (currentPermissions.write and currentPermissions.execute) then
+            return false, "No permission to create directory"
+        end
+    end
+
+    findFilesystem(path).makeDir(kInternal.fs, path)
+
+    sysmeta[path:sub(8)] = {
+        type = "d",
+        owner = uid,
+        group = 0,
+        privilege = 755
+    }
+
+    local f, err = kernel.fs.open("system:core/a.sysmeta", "w")
+    if not f then return false, "Failed to update sysmeta: "..err end
+    f.write(serpent.serialize(sysmeta, {compact = true}))
+    f.close()
+
+    return true
 end
 
 function _G.sleep(time)
@@ -591,3 +918,11 @@ end
 
 kernel.term.logMessage("kernel hashlib loaded", "kernel", "OK")
 kernel.term.flush()
+
+
+
+
+kernel.fs.makeDir("system:test")
+local file = kernel.fs.open("system:test/hi.txt", "w")
+file.write("hi")
+file.close()
