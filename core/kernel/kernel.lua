@@ -23,7 +23,7 @@ _G.kernel.term      = {}
 _G.kernel.ipc       = {}
 _G.kernel.hashlib   = {}
 _G.kernel.scheduler = {}
-_G.kernel.version   = "0.3.2"
+_G.kernel.version   = "0.3.3"
 
 kernel.fs                                 = {}
 
@@ -38,17 +38,66 @@ kInternal.gids                            = {0}
 kInternal.rgids                           = {0}
 kInternal.peripherals                     = peripherals
 kInternal.fs                              = {}
+kInternal.activeMessages                  = false
 
 for k,v in pairs(fs) do kernel.fs[k] = v end
 for k,v in pairs(fs) do kInternal.fs[k] = v end
 for k,v in pairs(screen) do kernel.term[k] = v end
 for k,v in pairs(screen) do kInternal.scrBackup[k] = v end
 
-kernel.term.setColor = nil
 _ENV.screen = nil
 _ENV.peripherals = nil
 _G.fs = nil
 
+function _ENV.error(message, level)
+    kernel.term.logMessage(message, "error", "ERROR")
+end
+
+math.randomseed(math.abs(chip.getTime()))
+
+--compatibility
+_G.loadstring = load
+_G.loadfile = function(filename, mode, env)
+    if not kInternal.fs.exists(filename) then print(filename.." does not exist"); return nil, filename.." does not exist" end
+    local file, err = kernel.fs.open(filename, "r")
+    if err then print("FS ERROR: "..err) end
+    local fn, err = load(file.read("a"), "="..filename, mode, env)
+    file.close()
+    return fn, err
+end
+
+function _G.dofile(filename)
+    local mergedEnv = {}
+    for k,v in pairs(_G) do mergedEnv[k] = v end
+    for k,v in pairs(_ENV) do mergedEnv[k] = v end
+
+    local fn, err = loadfile(filename, "bt", mergedEnv)
+    if not fn then return nil, err end
+    return fn()
+end
+
+function kernel.readTableFile(path)
+    local file = kernel.fs.open(path, "r")
+    return load("local t = "..file.read("a").."\nreturn t", "="..path, "t", _ENV)()
+end
+
+kInternal.systemRegistry, err = kernel.readTableFile("system:registry/system.reg")
+if err then kernel.term.write("SYSTEM REGISTRY ERROR. SEE CONSOLE"); print(err); return end
+
+if (not kInternal.systemRegistry) or (kInternal.systemRegistry == {}) then
+    kernel.term.write("COULD NOT LOCATE SYSTEM REGISTRY"); return
+end
+
+if kInternal.systemRegistry.KERNEL.startup_messaging == true then kInternal.activeMessages = true end
+
+function kInternal.readSysmeta()
+    local file = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "r")
+    return load("local t = "..file.read("a").."\nreturn t", "="..kInternal.systemRegistry.FILESYSTEM.METAFILE, mode, _ENV)()
+end
+
+function kernel.lib(name)
+    return dofile(kInternal.systemRegistry.KERNEL.library_location.."/"..name)
+end
 
 function _G.sleep(time)
     local t = chip.getTime()
@@ -61,20 +110,22 @@ function _G.sleep(time)
 end
 
 function kernel.term.print(...)
-    local n = select('#', ...)
-    if n == 0 then
-        NexB.writeScr("\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
-        return
+    if kInternal.activeMessages then
+        local n = select('#', ...)
+        if n == 0 then
+            NexB.writeScr("\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
+            return
+        end
+
+        local parts = {}
+        for i = 1, n do
+            parts[#parts + 1] = tostring(select(i, ...))
+        end
+
+        local str = table.concat(parts, "\t")
+
+        NexB.writeScr(str .. "\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
     end
-
-    local parts = {}
-    for i = 1, n do
-        parts[#parts + 1] = tostring(select(i, ...))
-    end
-
-    local str = table.concat(parts, "\t")
-
-    NexB.writeScr(str .. "\n", kInternal.term.foregroundColor, kInternal.term.backgroundColor)
 end
 
 function kernel.term.expect(value, vtype, message)
@@ -104,11 +155,12 @@ kernel.term.setCursorPos = NexB.setCursorPos
 kernel.term.getCursorPos = NexB.getCursorPos
 kernel.term.flush        = NexB.flush
 function kernel.term.write(str)
-    NexB.writeScr(str, kInternal.term.foregroundColor, kInternal.term.backgroundColor)
+    if kInternal.activeMessages then NexB.writeScr(str, kInternal.term.foregroundColor, kInternal.term.backgroundColor) end
 end
 function kernel.term.clear()
     local scr_w, scr_h = kernel.term.getSize()
 
+    kernel.term.setColor(kInternal.term.backgroundColor[1], kInternal.term.backgroundColor[2], kInternal.term.backgroundColor[3])
     kernel.term.fill(0,0,scr_w, scr_h)
 
     kernel.term.setCursorPos(0,0)
@@ -179,46 +231,31 @@ function kernel.term.logMessage(msg, name, msgType)
     kernel.term.print("] "..name..msg)
 end
 
+if kInternal.systemRegistry.KERNEL.boot_script then
+    if kInternal.fs.exists(kInternal.systemRegistry.KERNEL.boot_script) then
+        local fns, err = dofile(kInternal.systemRegistry.KERNEL.boot_script)
+        if err then
+            kInternal.activeMessages = true
+            kernel.term.logMessage("Boot script error, see console", "kernel", "WARN")
+            kernel.term.flush()
+            print(err)
+        end
+        if (not fns.start_boot) or (not fns.end_boot) then
+            kInternal.activeMessages = true
+            kernel.term.logMessage("Boot script start and end functions not found", "kernel", "WARN")
+            kernel.term.flush()
+        else
+            kInternal.boot_end = fns.end_boot
+            fns.start_boot()
+        end
+    else
+        kernel.term.logMessage("Invalid boot script path", "kernel", "WARN")
+        kernel.term.flush()
+    end
+end
+
 kernel.term.logMessage("kernel term functions loaded", "kernel", "OK")
 kernel.term.flush()
-
-function _ENV.error(message, level)
-    kernel.term.logMessage(message, "error", "ERROR")
-end
-
-math.randomseed(math.abs(chip.getTime()))
-
---compatibility
-_G.loadstring = load
-_G.loadfile = function(filename, mode, env)
-    local file, err = kernel.fs.open(filename, "r")
-    if not kInternal.fs.exists(filename) then print(filename.." does not exist") end
-    if err then print("FS ERROR: "..err) end
-    local fn, err = load(file.read("a"), "="..filename, mode, env)
-    file.close()
-    return fn, err
-end
-
-function _G.dofile(filename)
-    return loadfile(filename, "="..filename, "bt", _ENV)()
-end
-
-function kernel.readTableFile(path)
-    local file = kernel.fs.open(path, "r")
-    return load("local t = "..file.read("a").."\nreturn t", "="..path, "t", _ENV)()
-end
-
-kInternal.systemRegistry, err = kernel.readTableFile("system:registry/system.reg")
-if err then kernel.term.logMessage("SYSTEM REGISTRY ERROR. SEE CONSOLE", "kernel", "CRITICAL"); print(err); return end
-
-if (not kInternal.systemRegistry) or (kInternal.systemRegistry == {}) then
-    kernel.term.logMessage("COULD NOT LOCATE SYSTEM REGISTRY", "kernel", "CRITICAL"); return
-end
-
-function kInternal.readSysmeta()
-    local file = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "r")
-    return load("local t = "..file.read("a").."\nreturn t", "="..kInternal.systemRegistry.FILESYSTEM.METAFILE, mode, _ENV)()
-end
 
 local modulePath = kInternal.systemRegistry.KERNEL.module_location
 local mountPaths = kInternal.systemRegistry.FILESYSTEM.MOUNTS
@@ -763,6 +800,17 @@ local function deep_copy(original)
     return copy_recursive(original)
 end
 
+function kernel.fs.readChunked(handle, chunkSize)
+    chunkSize = chunkSize or 8192
+    local chunkedData = {}
+    while true do
+        local chunk = handle.read(chunkSize)
+        if not chunk or #chunk == 0 then break end
+        table.insert(chunkedData, chunk)
+    end
+    return table.concat(chunkedData)
+end
+
 local scheduler = {
     procs = {},
     current = nil,
@@ -1106,6 +1154,8 @@ if not kernel.fs.exists(kInternal.systemRegistry.KERNEL.init) then
 else
     kernel.term.logMessage("located init script, loading...", "kernel", "OK")
     kernel.term.flush()
+    kInternal.activeMessages = true
+    if kInternal.boot_end then kInternal.boot_end() end
     local _, err = kernel.scheduler.spawnFile(kInternal.systemRegistry.KERNEL.init, 0)
     if err then print(err) end
 end

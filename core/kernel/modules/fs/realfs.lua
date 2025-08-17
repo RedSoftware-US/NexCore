@@ -1,7 +1,17 @@
 local realfs = {}
 
 function realfs.open(kfs, path, mode)
-    return kfs.open(path, mode)
+    local handle = kfs.open(path, mode)
+    function handle:readAll()
+        local chunkedData = {}
+        while true do
+            local chunk = handle.read(8192)
+            if not chunk or #chunk == 0 then break end
+            table.insert(chunkedData, chunk)
+        end
+        return table.concat(chunkedData)
+    end
+    return handle
 end
 
 function realfs.exists(kfs, path)

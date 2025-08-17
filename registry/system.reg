@@ -5,6 +5,8 @@
         module_location = "system:core/kernel/modules",
         library_location = "system:lib",
         enable_hashlib = true,
+        boot_script = "",
+        startup_messaging = true,
     },
     ["USERS"] = {
         ["0"] = {

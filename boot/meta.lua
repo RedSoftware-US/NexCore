@@ -1,5 +1,5 @@
 {
     name = "KairOS",
-    version = "0.3.2 Centurion",
+    version = "0.3.3 Centurion",
     entrypoint = "system:core/kernel/kernel.lua"
 }
