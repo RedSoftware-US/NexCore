@@ -634,7 +634,7 @@ end
 
 function kernel.fs.isFile(path)
     if not kernel.fs.exists(path) then return false end
-    return findFilesystem(path).isFile(kInternal.fs, path) or false
+    return (not findFilesystem(path).isDir(kInternal.fs, path)) or false
 end
 
 function kernel.fs.isDir(path)
@@ -1094,9 +1094,7 @@ scheduler.run()
 ]]
 
 if kInternal.systemRegistry.KERNEL.enable_hashlib == true then
-    local fn, err = loadfile(kInternal.systemRegistry.KERNEL.library_location.."/libsha.lua", "t", _ENV)
-    if err then print("ERROR: "..err) end
-    local sha256 = fn()
+    local sha256 = kernel.lib("core/libsha.lua")
 
     local charset = "qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM1234567890"
 
