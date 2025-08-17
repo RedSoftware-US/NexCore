@@ -93,7 +93,6 @@ NexCore targets the NeetComputers platform.
 Security is a fundamental design goal:
 
 * Password hashes stored in the registry are only writable by root or by tools with explicit capabilities.
-* Capability-based IPC reduces the kernel's trust surface.
 * Future work will define secure update paths for the registry, signed backups, and protected edits.
 
 ---
@@ -107,23 +106,6 @@ APIs and bindings are currently under design. Planned surface areas include:
 * IPC primitives for capability-based communication.
 
 ---
-
-## Getting started (conceptual)
-
-Because the project is currently documentation & spec-first, there is no runnable kernel yet. When code lands, a typical quickstart will look like:
-
-1. Clone the NexCore repository and read the specification.
-2. Create a `/core/registry/system.reg` based on the provided template.
-3. Place your init binary path in `SYSTEM.KERNEL.init`.
-4. Boot NeetComputers with the NexCore kernel image.
-
----
-
-## Contributing & Community
-
-* The project is not yet accepting code contributions. The repo is focused on design and documentation for the moment.
-* Issues, suggestions, and roadmap requests are welcome via GitHub issues or the contact channels below.
-* If you want to discuss design, reach out on Discord or by email.
 
 **Contact:**
 
