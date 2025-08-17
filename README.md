@@ -65,8 +65,6 @@ The driver API (loader, capability registration, lifecycle) is a work in progres
 
 ## Status & Roadmap
 
-**Current status:** design & documentation phase. There is no production code yet; the project is defining architecture and registry semantics.
-
 **Near-term roadmap:**
 
 * Define the driver/module loading API and publish the first specification.
@@ -109,9 +107,9 @@ APIs and bindings are currently under design. Planned surface areas include:
 
 **Contact:**
 
-* GitHub: `https://github.com/SpartanSf/NexCore`
-* Discord: `swoshswosh_01578`
-* Email: `swoshswosh@proton.me`
+* GitHub: `https://github.com/RedSoftware-US/NexCore`
+* Discord: `red.software`
+* Email: `redsoftware-us@proton.me`
 
 ---
 
