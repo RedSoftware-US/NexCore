@@ -23,7 +23,7 @@ _G.kernel.term      = {}
 _G.kernel.ipc       = {}
 _G.kernel.hashlib   = {}
 _G.kernel.scheduler = {}
-_G.kernel.version   = "0.3.3"
+_G.kernel.version   = "0.3.4"
 
 kernel.fs                                 = {}
 
@@ -39,6 +39,7 @@ kInternal.rgids                           = {0}
 kInternal.peripherals                     = peripherals
 kInternal.fs                              = {}
 kInternal.activeMessages                  = false
+kInternal.messageList                     = {}
 
 for k,v in pairs(fs) do kernel.fs[k] = v end
 for k,v in pairs(fs) do kInternal.fs[k] = v end
@@ -70,10 +71,13 @@ function _G.dofile(filename)
     local mergedEnv = {}
     for k,v in pairs(_G) do mergedEnv[k] = v end
     for k,v in pairs(_ENV) do mergedEnv[k] = v end
-
-    local fn, err = loadfile(filename, "bt", mergedEnv)
+    local fn, err = loadfile(filename, "t", mergedEnv)
     if not fn then return nil, err end
     return fn()
+end
+
+function kernel.addGlobal(k, v)
+    _G[k] = v
 end
 
 function kernel.readTableFile(path)
@@ -90,13 +94,98 @@ end
 
 if kInternal.systemRegistry.KERNEL.startup_messaging == true then kInternal.activeMessages = true end
 
+function kInternal.updateSysreg()
+    local file = kInternal.fs.open("system:registry/system.reg", "r")
+    local filedata = file.read("a")
+    kInternal.systemRegistry = load("local t = "..filedata.."\nreturn t", "=".."system:registry/system.reg", "t", _ENV)()
+end
+
 function kInternal.readSysmeta()
     local file = kInternal.fs.open(kInternal.systemRegistry.FILESYSTEM.METAFILE, "r")
-    return load("local t = "..file.read("a").."\nreturn t", "="..kInternal.systemRegistry.FILESYSTEM.METAFILE, mode, _ENV)()
+    local filedata = file.read("a")
+    return load("local t = "..filedata.."\nreturn t", "="..kInternal.systemRegistry.FILESYSTEM.METAFILE, mode, _ENV)()
 end
 
 function kernel.lib(name)
     return dofile(kInternal.systemRegistry.KERNEL.library_location.."/"..name)
+end
+
+function kernel.readPath()
+    kInternal.systemRegistry, _ = kernel.readTableFile("system:registry/system.reg")
+    return kInternal.systemRegistry.PATH
+end
+
+function kernel.getPathFiles()
+    kInternal.systemRegistry, _ = kernel.readTableFile("system:registry/system.reg")
+    local allFiles = {}
+
+    for _, v in ipairs(kInternal.systemRegistry.PATH) do
+        for _, j in ipairs(kernel.fs.getChildren(v)) do
+            table.insert(allFiles, v.."/"..j)
+        end
+    end
+
+    return allFiles
+end
+
+function kernel.addUser(username, hashv)
+    if kInternal.uid == 0 then
+        local serpent = kernel.lib("core/libserpent.lua")
+
+        local highest_uid = 0
+        for uid, _ in pairs(kInternal.systemRegistry.USERS) do
+            if tonumber(uid) > highest_uid then
+                highest_uid = tonumber(uid)
+            end
+        end
+
+        local newUID
+
+        if highest_uid == 0 then
+            newUID = 1000
+        else
+            newUID = highest_uid + 1
+        end
+
+        kInternal.systemRegistry.USERS[tostring(newUID)] = {}
+        kInternal.systemRegistry.USERS[tostring(newUID)].name = username
+        kInternal.systemRegistry.USERS[tostring(newUID)].gids = {newUID}
+        kInternal.systemRegistry.USERS[tostring(newUID)].hash = hashv
+
+        local systemRegFile = kernel.fs.open("system:registry/system.reg", "w")
+        systemRegFile.write(serpent.serialize(kInternal.systemRegistry, {}))
+        systemRegFile.close()
+
+        return true
+    else return nil, "Refused" end
+end
+
+function kernel.changeUsername(uid, username)
+    if kInternal.uid == 0 then
+        local serpent = kernel.lib("core/libserpent.lua")
+
+        systemRegistry.USERS[tostring(uid)].name = username
+
+        local systemRegFile = kernel.fs.open("system:registry/system.reg", "w")
+        systemRegFile.write(serpent.serialize(systemRegistry, {}))
+        systemRegFile.close()
+
+        return true
+    else return nil, "Refused" end
+end
+
+function kernel.changeHash(uid, hashv)
+    if kInternal.uid == 0 then
+        local serpent = kernel.lib("core/libserpent.lua")
+
+        systemRegistry.USERS[tostring(uid)].hash = hashv
+
+        local systemRegFile = kernel.fs.open("system:registry/system.reg", "w")
+        systemRegFile.write(serpent.serialize(systemRegistry, {}))
+        systemRegFile.close()
+
+        return true
+    else return nil, "Refused" end
 end
 
 function _G.sleep(time)
@@ -154,6 +243,7 @@ end
 kernel.term.setCursorPos = NexB.setCursorPos
 kernel.term.getCursorPos = NexB.getCursorPos
 kernel.term.flush        = NexB.flush
+kernel.term.input        = NexB.getInput
 function kernel.term.write(str)
     if kInternal.activeMessages then NexB.writeScr(str, kInternal.term.foregroundColor, kInternal.term.backgroundColor) end
 end
@@ -273,7 +363,7 @@ for k,v in pairs(mountPaths) do
     end
 end
 
-local function sanitizePath(path)
+function kernel.fs.sanitizePath(path)
     path = tostring(path)
 
     path = path:gsub("/+", "/")
@@ -379,7 +469,7 @@ local function checkPermissions(path, requireWrite, requireExecute)
 end
 
 local function getParent(path)
-    path = sanitizePath(path)
+    path = kernel.fs.sanitizePath(path)
     local partition, subPath = path:match("([^:]+):/?(.*)")
     if not subPath or subPath == "" then
         return partition .. ":/"
@@ -478,10 +568,17 @@ end
 
 kernel.syncSysmeta()
 
+local serpent = kernel.lib("core/libserpent.lua")
+
 function kernel.fs.open(path, mode)
-    path = sanitizePath(path)
+    kInternal.updateSysreg()
+
+    path = kernel.fs.sanitizePath(path)
     local sysmeta = kInternal.readSysmeta()
     local uid = kInternal.uid
+
+    print(uid, serpent.serialize(kInternal.systemRegistry, {}))
+
     local gids = kInternal.systemRegistry.USERS[tostring(uid)].gids
 
     local exists = kInternal.fs.exists(path)
@@ -545,7 +642,7 @@ function kernel.fs.open(path, mode)
 end
 
 function kernel.fs.createFile(path, owner, group, privilege)
-    path = sanitizePath(path)
+    path = kernel.fs.sanitizePath(path)
 
     owner = owner or kInternal.uid
     group = group or 0
@@ -579,7 +676,9 @@ function kernel.fs.createFile(path, owner, group, privilege)
 end
 
 function kernel.fs.exists(path)
-    path = sanitizePath(path)
+    kInternal.updateSysreg()
+
+    path = kernel.fs.sanitizePath(path)
 
     local sysmeta = kInternal.readSysmeta()
     local uid = kInternal.uid
@@ -643,6 +742,8 @@ function kernel.fs.isDir(path)
 end
 
 function kernel.fs.delete(path)
+    kInternal.updateSysreg()
+
     if not kernel.fs.exists(path) then return nil, "Path does not exist" end
 
     local sysmeta = kInternal.readSysmeta()
@@ -708,7 +809,9 @@ function kernel.fs.getChildren(path)
 end
 
 function kernel.fs.makeDir(path)
-    path = sanitizePath(path)
+    kInternal.updateSysreg()
+
+    path = kernel.fs.sanitizePath(path)
     local parent = getParent(path)
 
     if not kernel.fs.exists(parent) then
@@ -822,19 +925,25 @@ function kernel.scheduler.spawn(fn, nice)
     local pid = scheduler.nextPid
     scheduler.nextPid = scheduler.nextPid + 1
     local co = coroutine.create(fn)
-    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn, uid = kInternal.uid, gids = kInternal.gids, ruid = kInternal.ruid, rgids = kInternal.rgids, canSetUID = false }
+    scheduler.procs[pid] = { co = co, pid = pid, nice = nice or 0, fn = fn, uid = kInternal.uid, gids = kInternal.gids, ruid = kInternal.ruid, rgids = kInternal.rgids, canSetUID = false, ipc_waiting = false }
     return pid
 end
 
-function kernel.scheduler.spawnFile(path, nice)
+local function merge(a, b) if b then for k,v in pairs(b) do a[k] = v end end; return a; end
+
+function kernel.scheduler.spawnFile(path, nice, args, extra_env)
     local pid = scheduler.nextPid
     scheduler.nextPid = scheduler.nextPid + 1
-    local fn, err = loadfile(path, "bt", deep_copy(_ENV))
+    local fn, err = loadfile(path, "bt", merge(deep_copy(_ENV), extra_env or {}))
     if not fn then return nil, err end
     local sysmeta = kInternal.readSysmeta()
     if not sysmeta[path:sub(8)] then return nil, "Could not find path in sysmeta" end
 
-    local co = coroutine.create(fn)
+    args = args or {}
+
+    local co = coroutine.create(function()
+        fn(table.unpack(args))
+    end)
 
     local meta = sysmeta[path:sub(8)]
     local canSetUID = false
@@ -852,7 +961,8 @@ function kernel.scheduler.spawnFile(path, nice)
         ruid = kInternal.ruid,
         rgids = kInternal.rgids,
         canSetUID = canSetUID,
-        owner = meta.owner
+        owner = meta.owner,
+        ipc_waiting = false
     }
 
     return pid
@@ -922,6 +1032,11 @@ function kernel.scheduler.setRUID(newUID)
     return nil, "Permission denied"
 end
 
+function kernel.scheduler.waitPID(pid)
+    scheduler.procs[scheduler.current].waiting_for_dead = pid
+    coroutine.yield()
+end
+
 function scheduler.run()
     local BASE_QUANTUM = scheduler.baseQuantum
 
@@ -949,6 +1064,21 @@ function scheduler.run()
         end
 
         for i, proc in ipairs(runnable) do
+            if scheduler.procs[proc.pid].ipc_waiting == true then
+                kInternal.messageList[proc.pid] = kInternal.messageList[proc.pid] or {}
+                if not (#kInternal.messageList[proc.pid] > 0) then
+                    goto for_end
+                end
+                scheduler.procs[proc.pid].ipc_waiting = false
+            end
+            if scheduler.procs[proc.pid].waiting_for_dead then
+                if scheduler.procs[scheduler.procs[proc.pid].waiting_for_dead] then
+                    goto for_end
+                else
+                   scheduler.procs[proc.pid].waiting_for_dead = nil
+                end
+            end
+
             scheduler.current = proc.pid
             local weight = weights[i]
             local quantum = math.floor(BASE_QUANTUM * (weight / totalWeight) * #runnable)
@@ -963,6 +1093,7 @@ function scheduler.run()
             local ok, err = coroutine.resume(proc.co)
             if not ok then error(err) end
             debug.sethook(proc.co)
+            ::for_end::
         end
         kernel.term.flush()
 
@@ -998,11 +1129,26 @@ function kernel.scheduler.getPID()
     return scheduler.current
 end
 
+function kernel.scheduler.getEUsername()
+    for uid, data in pairs(kInternal.systemRegistry.USERS) do
+        if tonumber(uid) == kInternal.uid then
+            return data.name
+        end
+    end
+end
+
+function kernel.scheduler.getRUsername()
+    for uid, data in pairs(kInternal.systemRegistry.USERS) do
+        if tonumber(uid) == kInternal.ruid then
+            return data.name
+        end
+    end
+end
+
 kernel.term.logMessage("kernel scheduler loaded", "kernel", "OK")
 kernel.term.flush()
 
 local acl = {}
-local messageList = {}
 
 function kernel.ipc.register(name, aclrule)
     if type(name) ~= "string" then return false, "Expected name to be a string" end
@@ -1042,14 +1188,14 @@ end
 
 function kernel.ipc.messages()
     local pid = scheduler.current
-    messageList[pid] = messageList[pid] or {}
-    return messageList[pid]
+    kInternal.messageList[pid] = kInternal.messageList[pid] or {}
+    return kInternal.messageList[pid]
 end
 
 function kernel.ipc.collectMessages()
     local pid = scheduler.current
     local msgs = kernel.ipc.messages()
-    messageList[pid] = {}
+    kInternal.messageList[pid] = {}
     return msgs
 end
 
@@ -1059,9 +1205,14 @@ function kernel.ipc.send(name, message)
     if not kernel.ipc.canTransmit(name) then return false end
 
     local recipientPID = entry.owner
-    messageList[recipientPID] = messageList[recipientPID] or {}
-    table.insert(messageList[recipientPID], { pid = scheduler.current, msg = message })
+    kInternal.messageList[recipientPID] = kInternal.messageList[recipientPID] or {}
+    table.insert(kInternal.messageList[recipientPID], { pid = scheduler.current, msg = message })
     return true
+end
+
+function kernel.ipc.wait()
+    scheduler.procs[scheduler.current].ipc_waiting = true
+    coroutine.yield()
 end
 
 kernel.term.logMessage("kernel IPC loaded", "kernel", "OK")
